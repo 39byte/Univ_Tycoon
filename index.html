@@ -190,8 +190,12 @@ button{font:inherit;color:inherit}
 
 <div class="modal" id="modal" hidden><div class="card" id="mcard" role="dialog" aria-modal="true"></div></div>
 
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
 <script type="module">
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
 const $ = s => document.querySelector(s);
 const V3 = THREE.Vector3;
@@ -290,13 +294,120 @@ const sharedGeo = new Set(Object.values(GEO));
 function dispose(o){
   const shared = new Set(Object.values(mats));
   o.traverse(c => {
+    if(c.userData.asset) return;
     if(c.geometry && !sharedGeo.has(c.geometry)) c.geometry.dispose();
     if(c.material && c.material !== OUT && !shared.has(c.material)){ c.material.map?.dispose(); c.material.dispose() }
   });
 }
 
+// ================================================================ baked PBR assets (asset/, built by asset/src/build_assets.py)
+// Anything that fails to load (e.g. opened via file://) falls back to the toon primitives below.
+const ASSET = {}, TEX = {};
+{
+  const gl = new GLTFLoader(), tl = new THREE.TextureLoader();
+  await Promise.all([
+    ...['snow_rocks','ice_crystals','frost_pillar','snow_mountain','wpn_spear','wpn_hammer','wpn_staff','wpn_bow','wpn_flask','wpn_gauntlet','frost_golem',
+      'anims','frost_soldier','hero_sports','hero_strat','hero_eeu','hero_interp','hero_sci','hero_eng'].map(n =>
+      gl.loadAsync(`asset/models/${n}.glb`).then(g => {
+        g.scene.traverse(o => { o.userData.asset = 1; if(o.isMesh){ o.castShadow = true; o.receiveShadow = true; o.material.envMapIntensity = .7 } });
+        ASSET[n] = g.scene; if(g.animations.length) ASSET[n].userData.clips = g.animations;
+      }, () => {})),
+    ...['snow','ice'].flatMap(m => ['color','normal','rough'].map(c =>
+      tl.loadAsync(`asset/textures/${m}_${c}.jpg`).then(t => { t.wrapS = t.wrapT = THREE.RepeatWrapping; if(c==='color') t.colorSpace = THREE.SRGBColorSpace; TEX[m+'_'+c] = t }, () => {}))),
+  ]);
+}
+const asset = (n, node) => { const s = ASSET[n] && (node ? ASSET[n].getObjectByName(node) : ASSET[n]); if(!s) return null; const o = s.clone(true); o.position.set(0,0,0); return o };
+const envMap = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), .04).texture;
+function texGround(m, rep, r){
+  if(!TEX[m+'_color']) return null;
+  for(const c of ['color','normal','rough']) TEX[m+'_'+c].repeat.set(rep, rep);
+  const g = new THREE.Mesh(new THREE.CircleGeometry(r, 64), new THREE.MeshStandardMaterial({map:TEX[m+'_color'], normalMap:TEX[m+'_normal'], roughnessMap:TEX[m+'_rough'], envMapIntensity:.4}));
+  g.rotation.x = -Math.PI/2; g.receiveShadow = true; g.userData.asset = 1; return g;
+}
+
+// ---------------------------------------------------------------- rigged characters (Universal Base Characters + Universal Animation Library, CC0)
+// Clips keep bone rotations only, plus pelvis translation re-based per body so feet stay planted on either body type.
+const CLIP = Object.fromEntries((ASSET.anims?.userData.clips || []).map(c => {
+  c.tracks = c.tracks.filter(t => t.name.endsWith('.quaternion') || t.name === 'pelvis.position'); return [c.name, c] }));
+const ANIM_PELVIS = ASSET.anims?.getObjectByName('pelvis')?.position, CLIPSET = {};
+function clipsFor(body){
+  const p = body.getObjectByName('pelvis').position, key = p.toArray().map(v => v.toFixed(3)).join();
+  return CLIPSET[key] ??= Object.fromEntries(Object.entries(CLIP).map(([n, c]) => {
+    c = c.clone(); const t = c.tracks.find(t => t.name === 'pelvis.position'), d = p.clone().sub(ANIM_PELVIS);
+    if(t) for(let i=0; i<t.values.length; i+=3){ t.values[i] += d.x; t.values[i+1] += d.y; t.values[i+2] += d.z }
+    return [n, c] }));
+}
+function rigged(n){
+  if(!ASSET[n] || !CLIP.Idle_Loop) return null;
+  const root = new THREE.Group(), body = SkeletonUtils.clone(ASSET[n]); root.add(body);
+  return {root, body, rig:true, mixer:new THREE.AnimationMixer(body), clips:clipsFor(body), act:{}, cur:null};
+}
+function play(m, name, speed=1, restart=false, fade=.15){
+  let a = m.act[name];
+  if(!a){ a = m.act[name] = m.mixer.clipAction(m.clips[name]); if(!/Loop|Idle$/.test(name)){ a.setLoop(THREE.LoopOnce); a.clampWhenFinished = true } }
+  a.timeScale = speed;
+  if(m.cur === a && !restart) return;
+  if(m.cur === a){ a.reset().play(); return }
+  a.reset().fadeIn(fade).play(); m.cur?.fadeOut(fade); m.cur = a;
+}
+const fresh = (m, key, st) => { const f = key !== m.key || st < m.st0; m.key = key; m.st0 = st; return f };
+// Seconds into each clip where the blow lands, so impacts line up with the game's hit frames.
+const IMPACT = {Punch_Jab:.25, Punch_Cross:.33, Sword_Attack:.55, Spell_Simple_Shoot:.2, Pistol_Shoot:.08};
+const impactSpeed = (n, t) => clamp(IMPACT[n]/t, .6, 4);
+// Mount obj on a hand bone. x/y/z = where the object's local axes point in world space at bind (T-)pose:
+// character faces +Z, right hand at -X, palms down.
+function grip(body, side, obj, x, y, z, along=.09, down=.035){
+  body.updateMatrixWorld(true);
+  const hand = body.getObjectByName('hand_'+side), hp = hand.getWorldPosition(new V3());
+  const dir = hp.clone().sub(body.getObjectByName('lowerarm_'+side).getWorldPosition(new V3())).normalize();
+  const m = new THREE.Matrix4().makeBasis(new V3(...x), new V3(...y), new V3(...z)).setPosition(hp.addScaledVector(dir, along).add(new V3(0, -down, 0)));
+  m.premultiply(hand.matrixWorld.clone().invert()).decompose(obj.position, obj.quaternion, obj.scale);
+  hand.add(obj);
+}
+const POLE = [[0,-1,0],[0,0,1],[-1,0,0]];  // shaft along the knuckle line, business end forward
+function iceBlade(len){ const g = new THREE.Group(), b = asset('frost_pillar', 'pillar_crystal'); b.scale.set(.3, len, .12); b.position.y = .55*len; g.add(b); return g }
+const ATK = {fist:['Punch_Jab','Punch_Cross'], spear:['Sword_Attack'], hammer:['Sword_Attack'], staff:['Spell_Simple_Shoot'], flask:['Spell_Simple_Shoot'], bow:['Pistol_Shoot']};
+const SKILL = {fist:'Sprint_Loop', spear:'Sprint_Loop', hammer:'Sword_Attack', staff:'Spell_Simple_Shoot', flask:'Spell_Simple_Shoot', bow:'Pistol_Shoot'};
+function animHero(p, dt, idle){
+  const h = p.model, wep = p.D.weapon, st = idle ? 'idle' : p.state, f = fresh(h, st + (p.combo ?? 0), p.st ?? 0);
+  let lift = 0, spin = 0;
+  if(st === 'idle' || st === 'free'){
+    if(!idle && p.walk > .15) play(h, p.walk > .6 ? 'Sprint_Loop' : 'Jog_Fwd_Loop', p.walk > .6 ? p.D.speed/7.5 : 1.1);
+    else play(h, wep==='bow' ? 'Pistol_Idle_Loop' : 'Idle_Loop');
+  } else if(st === 'attack'){
+    const a = p.D.combo[p.combo], last = p.combo === p.D.combo.length-1, list = ATK[wep], n = list[p.combo % list.length], k = clamp(p.st/a.dur, 0, 1);
+    play(h, n, impactSpeed(n, a.dur*.42), f, .08);
+    if(last && wep==='fist') lift = Math.sin(k*Math.PI)*.35;
+    if(last && wep==='hammer') spin = easeOut(k)*Math.PI*2;
+  } else if(st === 'dodge') play(h, 'Roll', 1.47/.42, f, .06);
+  else if(st === 'skill'){ const n = SKILL[wep]; play(h, n, n==='Sprint_Loop' ? 1.8 : impactSpeed(n, .3), f, .08) }
+  else if(st === 'ult'){ play(h, 'Spell_Simple_Shoot', .45, f, .1); lift = p.fired ? Math.max(0, .8 - (p.st-.75)*2) : Math.sin(clamp(p.st/.75,0,1)*Math.PI*.5)*.8 }
+  else if(st === 'hurt') play(h, 'Hit_Chest', 1, f, .05);
+  else if(st === 'dead') play(h, 'Death01', 1.2, false, .1);
+  h.mixer.update(dt);
+  h.root.position.copy(p.pos); h.root.position.y += lift; h.root.rotation.y = p.yaw + spin;
+}
+function animEnemy(e, dt){
+  const m = e.m, E = ET[e.type], f = fresh(m, e.state + (e.atk?.kind || ''), e.st);
+  if(e.state === 'windup' && e.atk){ const n = e.atk.kind === 'shot' ? 'Pistol_Shoot' : 'Sword_Attack'; play(m, n, impactSpeed(n, e.atk.w), f, .1) }
+  else if(e.state === 'hit') play(m, 'Hit_Chest', 1, f, .05);
+  else if(e.state === 'stun') play(m, 'Hit_Head', .5, f, .05);
+  else if(e.state !== 'recover') play(m, e.walk > .2 ? 'Jog_Fwd_Loop' : e.type==='archer' ? 'Pistol_Idle_Loop' : 'Sword_Idle', e.walk > .2 ? E.speed/3.6 : 1);
+  m.mixer.update(dt);
+}
+
 // ================================================================ models
 function makeHero(d){
+  const RG = rigged('hero_'+d);
+  if(RG){
+    const w = DEPT[d].weapon, wa = asset({fist:'wpn_gauntlet', spear:'wpn_spear', hammer:'wpn_hammer', staff:'wpn_staff', flask:'wpn_flask', bow:'wpn_bow'}[w]);
+    if(w==='fist'){ grip(RG.body, 'r', wa, [0,0,1],[0,1,0],[-1,0,0], .06, .02); grip(RG.body, 'l', asset('wpn_gauntlet'), [0,0,1],[0,1,0],[1,0,0], .06, .02) }
+    else if(w==='bow') grip(RG.body, 'r', wa, [-1,0,0],[0,0,1],[0,1,0]);
+    else if(w==='flask') grip(RG.body, 'r', wa, [1,0,0],[0,0,1],[0,-1,0], .09, .06);
+    else { grip(RG.body, 'r', wa, ...POLE); if(w==='hammer') wa.translateY(-.35) }  // choke up on the long haft
+    RG.body.scale.setScalar(1.12);
+    return RG;
+  }
   const D = DEPT[d], skin = 0xF3D2B5;
   const root = new THREE.Group(), hips = new THREE.Group(); hips.position.y = 1.02; root.add(hips);
   const torso = part(new THREE.CapsuleGeometry(.27, .42, 4, 12), D.c1); torso.position.y = .42; hips.add(torso);
@@ -331,16 +442,39 @@ function makeHero(d){
   };
   const L = mkArm(-1), R = mkArm(1);
   const w = D.weapon, gl = D.glow;
-  if(w==='fist') for(const a of [L,R]){ const g = part(new THREE.BoxGeometry(.22,.24,.24), D.c2); a.grip.add(g); const n = part(new THREE.BoxGeometry(.24,.06,.12), gl, .9, false); n.position.set(0,-.08,.1); a.grip.add(n) }
-  if(w==='spear'){ const s = part(new THREE.CylinderGeometry(.035,.035,2.6,8), 0x5B3F28); s.position.y = -.5; R.grip.add(s); const t = part(new THREE.ConeGeometry(.09,.5,6), gl, .8); t.rotation.x = Math.PI; t.position.y = -2.0; R.grip.add(t); const f = part(new THREE.BoxGeometry(.02,.28,.18), D.c2, 0, false); f.position.y = -1.6; R.grip.add(f) }
-  if(w==='hammer'){ const h = part(new THREE.CylinderGeometry(.05,.05,1.3,8), 0x3B3B3B); h.position.y = -.45; R.grip.add(h); const b = part(new THREE.BoxGeometry(.75,.42,.42), D.c2); b.position.y = -1.12; R.grip.add(b); const s = part(new THREE.BoxGeometry(.77,.08,.44), gl, .8, false); s.position.y = -1.12; R.grip.add(s) }
-  if(w==='staff'){ const s = part(new THREE.CylinderGeometry(.035,.035,1.7,8), 0xEDE6D6); s.position.y = -.1; R.grip.add(s); const r = part(new THREE.TorusGeometry(.16,.025,6,18), D.c2); r.position.y = .82; R.grip.add(r); const o = part(new THREE.SphereGeometry(.1,12,10), gl, 1, false); o.position.y = .82; R.grip.add(o) }
-  if(w==='flask'){ const f = part(new THREE.SphereGeometry(.13,12,10), gl, .8); f.position.y = -.1; R.grip.add(f); const n = part(new THREE.CylinderGeometry(.04,.04,.14,8), 0xEDE6D6, 0, false); n.position.y = .06; R.grip.add(n); for(const x of [-.18,-.06,.06]){ const b = part(new THREE.SphereGeometry(.06,8,6), gl, .6, false); b.position.set(x,.02,.28); hips.add(b) } }
-  if(w==='bow'){ const b = part(new THREE.TorusGeometry(.55,.03,6,18,Math.PI), 0x3A2A1A); b.rotation.set(0, Math.PI/2, Math.PI/2); b.position.z = .02; L.grip.add(b); const s = part(new THREE.BoxGeometry(.01,1.1,.01), gl, 1, false); s.position.z = .02; L.grip.add(s); const q = part(new THREE.CylinderGeometry(.09,.09,.6,8), D.c2); q.position.set(.15,.5,-.3); q.rotation.z = .4; hips.add(q) }
+  const wa = asset({fist:'wpn_gauntlet', spear:'wpn_spear', hammer:'wpn_hammer', staff:'wpn_staff', flask:'wpn_flask', bow:'wpn_bow'}[w]);
+  if(wa){  // GLB weapons: grip at origin, business end +Y
+    if(w==='fist') for(const a of [L,R]){ const g = a===R ? wa : asset('wpn_gauntlet'); g.rotation.x = Math.PI/2; if(a===L) g.scale.x = -1; a.grip.add(g) }
+    if(w==='spear' || w==='hammer'){ wa.rotation.x = Math.PI; R.grip.add(wa) }
+    if(w==='staff') R.grip.add(wa);
+    if(w==='flask'){ wa.position.y = -.1; R.grip.add(wa); for(const x of [-.18,-.06,.06]){ const b = asset('wpn_flask'); b.scale.setScalar(.45); b.position.set(x,.02,.28); hips.add(b) } }
+    if(w==='bow'){ wa.rotation.y = -Math.PI/2; L.grip.add(wa); const q = part(new THREE.CylinderGeometry(.09,.09,.6,8), D.c2); q.position.set(.15,.5,-.3); q.rotation.z = .4; hips.add(q) }
+  } else {
+    if(w==='fist') for(const a of [L,R]){ const g = part(new THREE.BoxGeometry(.22,.24,.24), D.c2); a.grip.add(g); const n = part(new THREE.BoxGeometry(.24,.06,.12), gl, .9, false); n.position.set(0,-.08,.1); a.grip.add(n) }
+    if(w==='spear'){ const s = part(new THREE.CylinderGeometry(.035,.035,2.6,8), 0x5B3F28); s.position.y = -.5; R.grip.add(s); const t = part(new THREE.ConeGeometry(.09,.5,6), gl, .8); t.rotation.x = Math.PI; t.position.y = -2.0; R.grip.add(t); const f = part(new THREE.BoxGeometry(.02,.28,.18), D.c2, 0, false); f.position.y = -1.6; R.grip.add(f) }
+    if(w==='hammer'){ const h = part(new THREE.CylinderGeometry(.05,.05,1.3,8), 0x3B3B3B); h.position.y = -.45; R.grip.add(h); const b = part(new THREE.BoxGeometry(.75,.42,.42), D.c2); b.position.y = -1.12; R.grip.add(b); const s = part(new THREE.BoxGeometry(.77,.08,.44), gl, .8, false); s.position.y = -1.12; R.grip.add(s) }
+    if(w==='staff'){ const s = part(new THREE.CylinderGeometry(.035,.035,1.7,8), 0xEDE6D6); s.position.y = -.1; R.grip.add(s); const r = part(new THREE.TorusGeometry(.16,.025,6,18), D.c2); r.position.y = .82; R.grip.add(r); const o = part(new THREE.SphereGeometry(.1,12,10), gl, 1, false); o.position.y = .82; R.grip.add(o) }
+    if(w==='flask'){ const f = part(new THREE.SphereGeometry(.13,12,10), gl, .8); f.position.y = -.1; R.grip.add(f); const n = part(new THREE.CylinderGeometry(.04,.04,.14,8), 0xEDE6D6, 0, false); n.position.y = .06; R.grip.add(n); for(const x of [-.18,-.06,.06]){ const b = part(new THREE.SphereGeometry(.06,8,6), gl, .6, false); b.position.set(x,.02,.28); hips.add(b) } }
+    if(w==='bow'){ const b = part(new THREE.TorusGeometry(.55,.03,6,18,Math.PI), 0x3A2A1A); b.rotation.set(0, Math.PI/2, Math.PI/2); b.position.z = .02; L.grip.add(b); const s = part(new THREE.BoxGeometry(.01,1.1,.01), gl, 1, false); s.position.z = .02; L.grip.add(s); const q = part(new THREE.CylinderGeometry(.09,.09,.6,8), D.c2); q.position.set(.15,.5,-.3); q.rotation.z = .4; hips.add(q) }
+  }
   root.traverse(o => { if(o.isMesh) o.castShadow = o.material !== OUT });
   return {root, hips, head, armL:L.sh, armR:R.sh, legL:mkLeg(-1), legR:mkLeg(1)};
 }
 function makeEnemy(type){
+  const S = (type==='grunt' || type==='archer') && rigged('frost_soldier');
+  if(S){
+    if(type==='grunt') grip(S.body, 'r', iceBlade(.9), ...POLE);
+    else grip(S.body, 'r', asset('wpn_bow'), [-1,0,0],[0,0,1],[0,1,0]);
+    S.body.scale.setScalar(1.15);
+    return S;
+  }
+  const golem = (type==='brute' || type==='boss') && asset('frost_golem');
+  if(golem){
+    const g = n => golem.getObjectByName(n), m = {root:golem, hips:g('hips'), armL:g('shoulderL'), armR:g('shoulderR'), legL:g('hipL'), legR:g('hipR')};
+    if(type==='boss'){ const b = asset('frost_pillar', 'pillar_crystal'); b.scale.set(.35, 1.3, .15); b.position.y = -1.4; m.armR.add(b) }
+    golem.scale.setScalar(ET[type].scale);
+    return m;
+  }
   const c = {grunt:0x2B3F5C, archer:0x2F4F5A, brute:0x3A3F66, boss:0x1A1F38}[type], ice = 0x8FE3FF;
   const root = new THREE.Group(), hips = new THREE.Group(); hips.position.y = 1.0; root.add(hips);
   const torso = part(new THREE.CapsuleGeometry(.3, .45, 4, 10), c); torso.position.y = .42; hips.add(torso);
@@ -417,6 +551,9 @@ world.add(sun, sun.target);
 const worldSnow = snow(world, 1400, 26);
 let arena = new THREE.Group(); world.add(arena);
 const ARENA_R = 22;
+const GROUND = texGround('snow', 36, 140), FLOOR = GROUND && texGround('ice', 7, ARENA_R+1);
+if(FLOOR) FLOOR.position.y = .01;
+show.environment = world.environment = envMap;
 function buildArena(i){
   world.remove(arena); dispose(arena);
   arena = new THREE.Group(); world.add(arena);
@@ -425,25 +562,40 @@ function buildArena(i){
   world.background = sky; world.fog = new THREE.Fog(sky, 30, 110);
   hemi.intensity = lerp(1.15, .75, k); sun.intensity = lerp(1.9, 1.2, k);
   sun.color.set(new THREE.Color(0xFFF2DD).lerp(new THREE.Color(0xB9C8FF), k));
+  if(GROUND){
+    GROUND.material.color.set(0xffffff).lerp(new THREE.Color(0x9AA8C2), k); FLOOR.material.color.set(0xffffff).lerp(new THREE.Color(0x7E8FB0), k);
+    arena.add(GROUND, FLOOR);
+  } else {
   const ground = new THREE.Mesh(new THREE.CircleGeometry(140, 48), new THREE.MeshToonMaterial({color:new THREE.Color(0xDCE7F0).lerp(new THREE.Color(0x8C9BB5), k), gradientMap:grad}));
   ground.rotation.x = -Math.PI/2; ground.receiveShadow = true; arena.add(ground);
   const floor = new THREE.Mesh(new THREE.CircleGeometry(ARENA_R+1, 64), new THREE.MeshToonMaterial({color:new THREE.Color(0xB9D4E8).lerp(new THREE.Color(0x5D6E8E), k), gradientMap:grad}));
   floor.rotation.x = -Math.PI/2; floor.position.y = .01; floor.receiveShadow = true; arena.add(floor);
+  }
   for(const r of [6, 13, ARENA_R+.6]){ const m = new THREE.Mesh(GEO.ring, new THREE.MeshBasicMaterial({color:0x8FE3FF, transparent:true, opacity:.25, depthWrite:false})); m.rotation.x = -Math.PI/2; m.position.y = .02; m.scale.setScalar(r); arena.add(m) }
   const rnd = mulberry32(31 + i*13);
   for(let n=0; n<46; n++){
     const a = n/46*Math.PI*2 + rnd()*.1, r = ARENA_R + 1.5 + rnd()*3, h = 1.5 + rnd()*4;
+    const ic = asset('ice_crystals');
+    if(ic){ ic.scale.setScalar(h/2.4*(.8+rnd()*.4)); ic.position.set(Math.cos(a)*r, 0, Math.sin(a)*r); ic.rotation.y = rnd()*6.28; arena.add(ic); continue }
     const c = part(new THREE.OctahedronGeometry(1, 0), 0x8FE3FF, .25); c.scale.set(.6+rnd()*.6, h, .6+rnd()*.6);
     c.position.set(Math.cos(a)*r, h*.6, Math.sin(a)*r); c.rotation.set(rnd()*.3, rnd()*3, rnd()*.3); arena.add(c);
   }
   for(let n=0; n<28; n++){
     const a = rnd()*Math.PI*2, r = 45 + rnd()*40, h = 12 + rnd()*26;
+    const sm = asset('snow_mountain');
+    if(sm){ sm.scale.setScalar(h/22); sm.position.set(Math.cos(a)*r, -1, Math.sin(a)*r); sm.rotation.y = rnd()*6.28; arena.add(sm); continue }
     const m = new THREE.Mesh(new THREE.ConeGeometry(h*.7, h, 6), T(0xE6EEF6)); m.position.set(Math.cos(a)*r, h/2 - 1, Math.sin(a)*r); arena.add(m);
   }
   for(let n=0; n<8; n++){
     const a = n/8*Math.PI*2 + .3, r = 17;
+    const fp = asset('frost_pillar', 'pillar'), fc = asset('frost_pillar', 'pillar_crystal');
+    if(fp){ fp.position.set(Math.cos(a)*r, 0, Math.sin(a)*r); fp.rotation.y = a; fc.position.set(Math.cos(a)*r, 3.75, Math.sin(a)*r); fc.userData.spin = 1; arena.add(fp, fc); continue }
     const p = part(new THREE.CylinderGeometry(.5, .7, 3.2, 6), 0x4A5A78); p.position.set(Math.cos(a)*r, 1.6, Math.sin(a)*r); p.receiveShadow = true; arena.add(p);
     const t = part(new THREE.OctahedronGeometry(.4), 0x8FE3FF, 1, false); t.position.set(Math.cos(a)*r, 3.7, Math.sin(a)*r); arena.add(t); t.userData.spin = 1;
+  }
+  if(ASSET.snow_rocks) for(let n=0; n<18; n++){
+    const a = rnd()*Math.PI*2, r = ARENA_R + 7 + rnd()*22, k = asset('snow_rocks', 'rock_' + 'abc'[n%3]);
+    k.scale.setScalar(.8 + rnd()*1.4); k.position.set(Math.cos(a)*r, 0, Math.sin(a)*r); k.rotation.y = rnd()*6.28; arena.add(k);
   }
 }
 
@@ -772,6 +924,7 @@ function updatePlayer(dt){
   poseHero(P, dt);
 }
 function poseHero(p, dt, idle=false){
+  if(p.model.rig) return animHero(p, dt, idle);
   const h = p.model, w = p.walk, sw = Math.sin(p.phase);
   let aR = sw*.6*w - .12, aL = -sw*.6*w - .12, hipY = 0, hipX = w*.14, zR = 0, zL = 0, lift = 0, spin = false, armZ = 0;
   const wep = p.D.weapon;
@@ -882,6 +1035,7 @@ function updateEnemies(dt){
     const E = ET[e.type], m = e.m;
     if(e.dead){
       e.deadT += dt;
+      if(m.rig){ play(m, 'Death01', 1.6); m.mixer.update(dt) }
       if(!e.gone){ m.root.scale.setScalar(E.scale*Math.max(.01, 1 - e.deadT*1.8)); m.root.position.y = -e.deadT; if(e.deadT > .6) killMesh(e) }
       continue;
     }
@@ -920,20 +1074,23 @@ function updateEnemies(dt){
     }
     const r = Math.hypot(e.pos.x, e.pos.z); if(r > ARENA_R){ e.pos.x *= ARENA_R/r; e.pos.z *= ARENA_R/r }
     e.walk = lerp(e.walk, moving, Math.min(1, dt*10)); e.phase += dt*9*e.walk;
-    const sw = Math.sin(e.phase);
-    let aR = sw*.5*e.walk, aL = -sw*.5*e.walk, hx = 0;
-    if(e.state==='windup' && e.atk){
-      const k = clamp(e.st/e.atk.w, 0, 1);
-      if(e.atk.kind==='shot'){ aR = -1.5; aL = -1.2 }
-      else if(e.atk.kind==='slam' || e.atk.kind==='nova'){ aR = aL = -2.8*easeOut(k); hx = -.25*k }
-      else { aR = -2.7*easeOut(k); hx = -.15*k }
+    if(m.rig) animEnemy(e, dt);
+    else {
+      const sw = Math.sin(e.phase);
+      let aR = sw*.5*e.walk, aL = -sw*.5*e.walk, hx = 0;
+      if(e.state==='windup' && e.atk){
+        const k = clamp(e.st/e.atk.w, 0, 1);
+        if(e.atk.kind==='shot'){ aR = -1.5; aL = -1.2 }
+        else if(e.atk.kind==='slam' || e.atk.kind==='nova'){ aR = aL = -2.8*easeOut(k); hx = -.25*k }
+        else { aR = -2.7*easeOut(k); hx = -.15*k }
+      }
+      if(e.state==='recover' && e.st < .2){ aR = -.4; if(e.lastKind==='slam' || e.lastKind==='nova') aL = -.4; hx = .35 }
+      if(e.state==='hit') hx = -.4;
+      if(e.state==='stun'){ hx = .5 + Math.sin(now*6)*.05; aR = aL = .3 }
+      m.armR.rotation.x = lerp(m.armR.rotation.x, aR, .35); m.armL.rotation.x = lerp(m.armL.rotation.x, aL, .35);
+      m.hips.rotation.x = lerp(m.hips.rotation.x, hx, .3);
+      m.legL.rotation.x = sw*.7*e.walk; m.legR.rotation.x = -sw*.7*e.walk;
     }
-    if(e.state==='recover' && e.st < .2){ aR = -.4; if(e.lastKind==='slam' || e.lastKind==='nova') aL = -.4; hx = .35 }
-    if(e.state==='hit') hx = -.4;
-    if(e.state==='stun'){ hx = .5 + Math.sin(now*6)*.05; aR = aL = .3 }
-    m.armR.rotation.x = lerp(m.armR.rotation.x, aR, .35); m.armL.rotation.x = lerp(m.armL.rotation.x, aL, .35);
-    m.hips.rotation.x = lerp(m.hips.rotation.x, hx, .3);
-    m.legL.rotation.x = sw*.7*e.walk; m.legR.rotation.x = -sw*.7*e.walk;
     m.root.position.set(e.pos.x, e.y, e.pos.z); m.root.rotation.y = e.yaw;
     m.root.scale.setScalar(E.scale*(e.pop > 0 ? 1.08 : 1)*(e.state==='spawn' ? clamp(e.st/.5, .01, 1) : 1));
     if(e.type !== 'boss'){
