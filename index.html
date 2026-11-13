@@ -200,43 +200,44 @@ const lerp = (a,b,k) => a + (b-a)*k;
 const easeOut = k => 1 - (1-k)*(1-k);
 const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
 const hex = c => '#' + c.toString(16).padStart(6,'0');
+const ro = w => { const j = (w.charCodeAt(w.length-1) - 0xAC00) % 28; return w + (j === 0 || j === 8 ? '로' : '으로') };
 function mulberry32(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
 
 // ================================================================ data
 const DEPT = {
-  sports:{college:'국제스포츠레저학부', name:'강하람', role:'격투가', weapon:'fist', c1:0xECE7DC, c2:0xE2483D, hair:0x1D1B22, pants:0x22252E, glow:0xFF6A3D,
+  sports:{college:'글로벌스포츠산업학부', name:'강하람', role:'격투가', weapon:'fist', c1:0xECE7DC, c2:0xE2483D, hair:0x1D1B22, pants:0x22252E, glow:0xFF6A3D,
     hp:950, atk:1.0, speed:7.6, stats:[4,4,5,1],
-    desc:'맨손 연타로 거리를 좁히는 근접 격투가. 콤보가 빠르고 끊기지 않습니다.',
+    desc:'Culture & Technology융합대학 글로벌스포츠산업학부 출신. 맨손 연타로 거리를 좁히는 근접 격투가로, 콤보가 빠르고 끊기지 않습니다.',
     combo:[{dmg:20,dur:.27,range:2.4,arc:2.0},{dmg:22,dur:.27,range:2.4,arc:2.0},{dmg:24,dur:.29,range:2.5,arc:2.0},{dmg:28,dur:.31,range:2.5,arc:2.2},{dmg:58,dur:.5,range:3.0,arc:3.4,heavy:1}],
     skill:{name:'돌진 연격', cd:6, desc:'앞으로 돌진하며 지나가는 적을 모두 타격합니다. 돌진 중 무적.'},
     ult:{name:'챔피언 러시', desc:'주변 모든 적에게 연타를 꽂아 넣습니다.'}},
-  strat:{college:'국가전략언어대학', name:'서윤슬', role:'저격 궁수', weapon:'bow', c1:0x2F4B3A, c2:0xD9C27A, hair:0xC9D3DA, pants:0x1E2A24, glow:0x7CFF9E,
+  strat:{college:'AI데이터융합학부', name:'서윤슬', role:'저격 궁수', weapon:'bow', c1:0x2F4B3A, c2:0xD9C27A, hair:0xC9D3DA, pants:0x1E2A24, glow:0x7CFF9E,
     hp:760, atk:1.0, speed:7.2, stats:[2,4,4,5],
-    desc:'전략 언어로 적의 움직임을 읽고 먼 거리에서 꿰뚫는 궁수. 4타째는 관통 화살.',
+    desc:'AI융합대학 AI데이터융합학부 출신. 데이터로 적의 움직임과 탄도를 예측해 먼 거리에서 꿰뚫는 궁수. 4타째는 관통 화살.',
     combo:[{dmg:20,dur:.3,proj:1},{dmg:20,dur:.3,proj:1},{dmg:24,dur:.32,proj:1},{dmg:50,dur:.5,proj:1,pierce:1,heavy:1}],
     skill:{name:'확산 사격', cd:7, desc:'부채꼴로 관통 화살 일곱 발을 쏩니다.'},
     ult:{name:'전략 폭격', desc:'하늘에서 화살비를 쏟아 넓은 범위를 휩씁니다.'}},
-  eeu:{college:'동유럽학대학', name:'마리카 정', role:'창기병', weapon:'spear', c1:0x4A2F6B, c2:0xE6C35C, hair:0xB5452F, pants:0x241A33, glow:0xC08BFF,
+  eeu:{college:'국가전략언어대학', name:'마리카 정', role:'창기병', weapon:'spear', c1:0x4A2F6B, c2:0xE6C35C, hair:0xB5452F, pants:0x241A33, glow:0xC08BFF,
     hp:880, atk:1.05, speed:7.4, stats:[3,4,4,3],
-    desc:'동유럽 평원의 기마술을 계승한 창잡이. 긴 사거리의 찌르기와 휩쓸기.',
+    desc:'국가전략언어대학 출신. 동유럽과 중앙아시아 평원의 기마술을 계승한 창잡이로, 긴 사거리의 찌르기와 휩쓸기가 특기입니다.',
     combo:[{dmg:26,dur:.33,range:3.8,arc:.9},{dmg:28,dur:.33,range:3.8,arc:.9},{dmg:30,dur:.38,range:3.3,arc:2.8},{dmg:64,dur:.55,range:4.4,arc:1.0,heavy:1}],
     skill:{name:'기병 돌격', cd:7, desc:'창을 앞세워 길게 돌진하며 경로의 적을 꿰뚫습니다. 돌진 중 무적.'},
     ult:{name:'평원의 창끝', desc:'창을 대지에 꽂아 보랏빛 충격파를 퍼뜨립니다.'}},
-  interp:{college:'통번역대학', name:'한소리', role:'언어 마법사', weapon:'staff', c1:0x203A6E, c2:0xEDE6D6, hair:0x2A2140, pants:0x182440, glow:0x6FC3FF,
+  interp:{college:'언어인지과학과', name:'한소리', role:'언어 마법사', weapon:'staff', c1:0x203A6E, c2:0xEDE6D6, hair:0x2A2140, pants:0x182440, glow:0x6FC3FF,
     hp:720, atk:1.1, speed:7.0, stats:[2,5,3,4],
-    desc:'말이 곧 마법이 되는 외대의 간판. 적을 쫓아가는 유도 마탄과 군중 제어.',
+    desc:'인문대학 언어인지과학과 출신. 말의 구조를 마법으로 바꿔 쓰는 마법사로, 적을 쫓아가는 유도 마탄과 군중 제어가 특기입니다.',
     combo:[{dmg:22,dur:.32,proj:1,homing:1},{dmg:22,dur:.32,proj:1,homing:1},{dmg:26,dur:.34,proj:1,homing:1},{dmg:52,dur:.5,proj:1,homing:1,aoe:2.6,heavy:1}],
     skill:{name:'언어 교란', cd:10, desc:'번역할 수 없는 문장을 외쳐 주변의 적을 3초간 멈춥니다.'},
     ult:{name:'동시통역 폭풍', desc:'수십 개 언어가 한꺼번에 폭발하는 마력 폭풍.'}},
   sci:{college:'자연과학대학', name:'도연우', role:'연금술사', weapon:'flask', c1:0xE9EEF0, c2:0x2A9D8F, hair:0x5B3A29, pants:0x2B3440, glow:0x7CFFB2,
     hp:780, atk:1.0, speed:7.0, stats:[3,4,3,4],
-    desc:'화학과 실험실에서 나온 폭발 플라스크를 던지는 연금술사. 모든 공격이 범위 피해.',
+    desc:'자연과학대학 화학과 출신. 실험실에서 나온 폭발 플라스크를 던지는 연금술사로, 모든 공격이 범위 피해입니다.',
     combo:[{dmg:18,dur:.34,proj:1,lob:1,aoe:2.2},{dmg:18,dur:.34,proj:1,lob:1,aoe:2.2},{dmg:22,dur:.36,proj:1,lob:1,aoe:2.4},{dmg:46,dur:.52,proj:1,lob:1,aoe:3.6,heavy:1}],
     skill:{name:'폭발 플라스크', cd:9, desc:'전방에 대형 플라스크를 던져 큰 폭발을 일으킵니다.'},
     ult:{name:'연쇄 반응', desc:'주변 일대를 연쇄 폭발로 뒤덮습니다.'}},
   eng:{college:'공과대학', name:'백철민', role:'해머 공병', weapon:'hammer', c1:0x8A6A3B, c2:0xF2B33D, hair:0x222222, pants:0x2A2622, glow:0xFFB627,
     hp:1250, atk:1.0, speed:6.4, stats:[5,5,2,2],
-    desc:'공학관에서 직접 깎은 대형 해머를 휘두르는 공병. 느리지만 한 방이 무겁습니다.',
+    desc:'공과대학 출신. 공학관에서 직접 깎은 대형 해머를 휘두르는 공병으로, 느리지만 한 방이 무겁습니다.',
     combo:[{dmg:46,dur:.5,range:3.0,arc:2.4},{dmg:50,dur:.52,range:3.0,arc:2.4},{dmg:105,dur:.8,range:3.7,arc:6.3,heavy:1}],
     skill:{name:'지진 강타', cd:9, desc:'땅을 내리찍어 주변 적을 공중에 띄웁니다.'},
     ult:{name:'중장비 투하', desc:'거대한 충격으로 주변을 평탄화합니다.'}},
@@ -1052,7 +1053,7 @@ function renderSelect(){
     <div class="skill"><kbd>E</kbd><b>${D.skill.name}</b><span>${D.skill.desc} 재사용 ${D.skill.cd}초</span></div>
     <div class="skill"><kbd>Q</kbd><b>${D.ult.name}</b><span>${D.ult.desc} 적을 때려 게이지를 채우면 쓸 수 있습니다.</span></div>
     <div class="skill"><kbd>⇧</kbd><b>극한 회피</b><span>적의 공격이 닿기 직전에 회피하면 시간이 느려지고 4초간 공격력이 30% 오릅니다.</span></div>
-    <button class="cta" data-act="confirm">${D.college}로 출정</button>`;
+    <button class="cta" data-act="confirm">${ro(D.college)} 출정</button>`;
 }
 function renderMap(){
   setShowHero(dept);
